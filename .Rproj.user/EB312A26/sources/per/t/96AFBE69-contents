@@ -1,0 +1,301 @@
+model_used <-c('xgb','lgb','nn')
+VERY_LARGE <- 1E34
+EPSILON <- 1 / VERY_LARGE
+#' @export
+simulate_time_series <- function(start_date = "2020-01-01",
+                                 freq = "week",
+                                 length_out = 156,
+                                 seasonal_periods = list(weekly = 7, quarterly = 13),
+                                 trend_slopes = c(0.1, -0.05, 0.2, -0.1, 0.15),
+                                 noise_sd = 3,
+                                 seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+
+  # Parse start date
+  is_hourly <- freq %in% c("hour", "hours")
+  start <- if (is_hourly) as.POSIXct(start_date) else as.Date(start_date)
+
+  # Generate timestamp sequence
+  if (is_hourly) {
+    ds <- seq.POSIXt(from = start, by = freq, length.out = length_out)
+  } else {
+    ds <- seq.Date(from = start, by = freq, length.out = length_out)
+  }
+
+  # Seasonal components
+  seasonal <- matrix(0, nrow = length_out, ncol = length(seasonal_periods))
+  colnames(seasonal) <- names(seasonal_periods)
+
+  for (i in seq_along(seasonal_periods)) {
+    period <- seasonal_periods[[i]]
+    seasonal[, i] <- sin(2 * pi * seq_along(ds) / period) * (10 / i)
+  }
+
+  seasonal_total <- rowSums(seasonal)
+
+  # Trend component
+  n_segments <- length(trend_slopes)
+  change_points <- round(seq(1, length_out, length.out = n_segments + 1))
+  trend <- numeric(length_out)
+
+  for (i in 1:n_segments) {
+    start <- change_points[i]
+    end <- change_points[i + 1] - 1
+    if (i == 1) {
+      trend[start:end] <- trend_slopes[i] * seq(0, end - start)
+    } else {
+      trend[start:end] <- trend[start - 1] + trend_slopes[i] * seq(1, end - start + 1)
+    }
+  }
+
+  # Noise
+  noise <- rnorm(length_out, mean = 0, sd = noise_sd)
+
+  # Combine
+  y <- 50 + seasonal_total + trend + noise
+  data.frame(ds = ds, y = y)
+}
+
+
+smape <- function(a, f) {
+  a[which(a==Inf)]<- VERY_LARGE
+  (1/length(a) * sum(2*abs(f-a) / (abs(a+EPSILON)+abs(f+EPSILON))))
+}
+
+auto_seasonal_periods <- function(ds, min_obs = 3) {
+  # ds: vector of Date or POSIXct timestamps
+
+  if (length(ds) < min_obs) stop("Not enough data points to detect frequency")
+
+  ds <- sort(ds)
+  diff_days <- as.numeric(median(diff(as.Date(ds)), na.rm = TRUE))
+
+  # Define frequency thresholds (in days)
+  freq <- case_when(
+    diff_days < 1 ~ "hourly",
+    diff_days < 2 ~ "daily",
+    diff_days < 8 ~ "weekly",
+    diff_days < 31 ~ "monthly",
+    diff_days < 92 ~ "quarterly",
+    TRUE ~ "yearly"
+  )
+
+  message("Detected frequency: ", freq)
+
+  # Map to seasonal periods
+  seasonal_periods <- switch(freq,
+                             "hourly" = list(
+                               daily = 24,
+                               weekly = 24 * 7,
+                               yearly = 24 * 365.25
+                             ),
+                             "daily" = list(
+                               weekly = 7,
+                               yearly = 365.25
+                             ),
+                             "weekly" = list(
+                               yearly = 52
+                             ),
+                             "monthly" = list(
+                               yearly = 12,
+                               quarterly = 3
+                             ),
+                             "quarterly" = list(
+                               yearly = 4
+                             ),
+                             "yearly" = list()  # Usually no seasonality
+  )
+
+  return(seasonal_periods)
+}
+
+find_lags<-function(df,max_lag=20)
+{
+  adf_test<-adf.test(df$y)
+  if (adf_test$p.value>0.05)  y <- diff(df$y)
+  else y<- df$y
+  pacf_vals <- pacf(y, lag.max = max_lag, plot = FALSE)
+  threshold <- 2 / sqrt(length(y))
+  significant_lags <- which(abs(pacf_vals$acf) > threshold)
+  significant_lags
+}
+
+
+create_fourier_terms <- function(t, period, prefix, K) {
+
+  terms <- list()
+  for (k in 1:K) {
+    terms[[paste0(prefix, "_sin", k)]] <- sin(2 * pi * k * t / period)
+    terms[[paste0(prefix, "_cos", k)]] <- cos(2 * pi * k * t / period)
+  }
+  return(as.data.frame(terms))
+}
+
+select_changepoints <- function(y, n_changepoints = NA, method = NA) {
+  n <- length(y)
+
+  if (!is.numeric(y)) stop("Input 'y' must be numeric.")
+
+  if (is.na(n_changepoints)) {
+    if (is.na(method)) {
+      n_changepoints <- min(25, floor(n / 25))
+      t_range <- 1:floor(0.9 * n)
+      cps <- quantile(t_range, probs = seq(0.05, 0.95, length.out = n_changepoints))
+    } else {
+      # You could allow method selection here
+      cpt <- changepoint::cpt.meanvar(y, method = method)
+      cps <- changepoint::cpts(cpt)
+    }
+  } else {
+    t_range <- 1:floor(0.9 * n)
+    cps <- quantile(t_range, probs = seq(0.05, 0.95, length.out = n_changepoints))
+  }
+
+  return(as.numeric(cps))
+}
+
+create_trend_features <- function(n, n_changepoints) {
+  t <- 1:n
+  A <- sapply(n_changepoints, function(sj) pmax(0, t - sj))
+  X <- cbind(t, A)
+  colnames(X) <- c("t", paste0("cp_", n_changepoints))
+  return(X)
+}
+
+auto_pick_K_all_components <- function(t, seasonal_periods, max_fraction = 0.05, max_K_cap = 5, min_K = 1) {
+  n <- length(t)
+  max_total_terms <- floor(n * max_fraction)
+
+  sapply(seasonal_periods, function(period) {
+    n_cycles <- n / period
+    K <- floor(min(max_total_terms, n_cycles * 2))  # 2 terms per K (sin/cos)
+    K <- min(K, max_K_cap)
+    K <- max(K, min_K)
+    return(K)
+  })
+}
+
+
+fit_trend_seasonal_model <- function(y,seasonal_periods,n_changepoints,method) {
+  n <- length(y)
+  t <- 1:n
+
+  # Trend
+  changepoints <- select_changepoints(y, n_changepoints,method)
+  trend_X <- create_trend_features(n, changepoints)
+
+  # select K
+  K_list<-auto_pick_K_all_components(t, seasonal_periods)
+
+  seasonal_X_list <- lapply(names(seasonal_periods), function(name) {
+    create_fourier_terms(t, seasonal_periods[[name]], prefix = name, K=K_list[[name]])
+  })
+  seasonal_X <- do.call(cbind, seasonal_X_list)
+
+  # Combine
+  X <- cbind(trend_X, seasonal_X)
+  model <- lm(y ~ . -1, data = data.frame(y = y, X))
+  betas <- coef(model)
+  betas <- betas[!is.na(betas)]
+  trend_vals <- as.vector(as.matrix(trend_X) %*% betas[colnames(trend_X)])
+
+  seasonality_outputs <- list()
+  for (i in seq_along(seasonal_X_list)) {
+    mat <- as.matrix(seasonal_X_list[[i]])
+    mat_cols <- colnames(mat)
+
+    # Keep only columns that have corresponding non-NA coefficients
+    valid_cols <- intersect(mat_cols, names(betas))
+    mat_valid <- mat[, valid_cols, drop = FALSE]
+    beta_valid <- betas[valid_cols]
+
+    # Compute seasonal component for this group
+    seasonality_outputs[[i]] <- as.vector(mat_valid %*% beta_valid)
+  }
+
+  names(seasonality_outputs)<-names(seasonal_periods)
+  return(list(
+    model = model,
+    changepoints = changepoints,
+    seasonal_periods = seasonal_periods,
+    n_train = n,
+    K_list=K_list, #fourier components
+    coef_names = colnames(X),
+    trend=trend_vals,
+    seasonality=seasonality_outputs
+
+  ))
+}
+
+predict_trend_seasonal_components <- function(model_obj, h) {
+  n_future <- model_obj$n_train + h
+  t_pred <- (model_obj$n_train + 1):n_future
+
+  # Trend
+  trend_X <- sapply(model_obj$changepoints, function(sj) pmax(0, t_pred - sj))
+  trend_X <- cbind(t = t_pred, trend_X)
+  colnames(trend_X) <- c("t", paste0("cp_", model_obj$changepoints))
+
+  # Seasonality
+  K_list<-model_obj$K_list
+  season_components <- list()
+  for (name in names(model_obj$seasonal_periods)) {
+    season_components[[name]] <- create_fourier_terms(
+      t_pred, model_obj$seasonal_periods[[name]], prefix = name,K_list[[name]]
+    )
+  }
+  seasonal_X <- do.call(cbind, unname(season_components))
+
+  # Full matrix for prediction
+  full_X <- data.frame(cbind(trend_X, seasonal_X))
+  preds <- predict(model_obj$model, newdata = full_X)
+
+  # Compute each component separately
+  betas <- coef(model_obj$model)
+  betas <- betas[!is.na(betas)]
+  trend_cols <- colnames(trend_X)
+  component_trend <- as.matrix(trend_X) %*% betas[trend_cols]
+
+  component_season <- list()
+  for (name in names(model_obj$seasonal_periods)) {
+    # Get seasonal columns with valid coefficients
+    season_cols <- grep(paste0("^", name, "_"), names(betas), value = TRUE)
+
+    # Only keep valid seasonal cols that exist in both matrix and beta
+    season_cols <- intersect(season_cols, colnames(season_components[[name]]))
+    if (length(season_cols) > 0) {
+      season_matrix <- as.matrix(season_components[[name]][, season_cols, drop = FALSE])
+      component_season[[name]] <- season_matrix %*% betas[season_cols]
+    } else {
+      component_season[[name]] <- rep(0, nrow(season_components[[name]]))
+    }
+  }
+  return(list(
+    forecast = preds,
+    trend = as.vector(component_trend),
+    seasonality = component_season,
+    t = t_pred
+  ))
+}
+
+
+prepare_trend_seasonal_component<-function(train,significant_lags,seasonal_periods,n_changepoints,method)
+{
+
+  ts_model <- fit_trend_seasonal_model(y=train$y,seasonal_periods=seasonal_periods, n_changepoints=n_changepoints,method=method)
+
+  train_feat <- cbind(train, trend = ts_model$trend)
+
+  # Add each seasonal component
+  for (name in names(ts_model$seasonality)) {
+    train_feat[[name]] <- ts_model$seasonality[[name]]
+  }
+
+  for (i in significant_lags) {
+    train_feat[[paste0("lag", i)]] <- dplyr::lag(train$y, i)
+  }
+  train_feat <- na.omit(train_feat)
+  return(list(train_feat=train_feat,ts_model=ts_model))
+}
+
+

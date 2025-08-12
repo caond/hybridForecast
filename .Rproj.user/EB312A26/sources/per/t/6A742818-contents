@@ -1,0 +1,29 @@
+#' hybridForecast: Hybrid Time Series Forecasting with Trend, Seasonality, and Machine Learning
+#'
+#' This package provides a hybrid modeling framework for time series forecasting, combining trend and seasonal decomposition with machine learning models like XGBoost, LightGBM, and neural networks.
+#'
+#' @docType package
+#' @name hybridForecast
+#'
+#' @import ggplot2
+#' @import dplyr
+#' @import lubridate
+#' @import changepoint
+#' @importFrom stats predict lm sd
+#' @importFrom utils head tail
+#'
+#' @examples
+#' # Simulate a time series
+#' data <- simulate_time_series(freq = "week", length_out = 156, seed = 42)
+#'
+#' # Fit hybrid model
+#' hybrid_model <- hybrid(data)
+#'
+#' # Plot CV results
+#' plot(hybrid_model)
+#'
+#' # Predict future
+#' future <- data.frame(ds=seq(max(data$ds)+7, by='week', length.out=30))
+#' forecast_hybrid_output <- predict(hybrid_model, future)
+#' plot(forecast_hybrid_output)
+NULL

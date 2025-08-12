@@ -1,0 +1,26 @@
+{
+    "id": "903E8B02",
+    "path": "W:/PAQ/EPG/System Analytics/Data Master/Cao analysis/Projects/hybridForecast/R/hybrid.R",
+    "project_path": "R/hybrid.R",
+    "type": "r_source",
+    "hash": "1096704787",
+    "contents": "",
+    "dirty": false,
+    "created": 1754552636943.0,
+    "source_on_save": false,
+    "relative_order": 2,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "38,7",
+        "scrollLine": "5"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1754638188,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1754638189294,
+    "read_only": false,
+    "read_only_alternatives": []
+}
