@@ -150,7 +150,7 @@ predict_hybrid_1<-function(hybrid_model,newdata,xreg)
 #' }
 #'
 #' @export
-predict.hybridForecast<-function(object,newdata,xreg=NA, ...)
+predict.hybridForecast_model<-function(object,newdata,xreg=NA, ...)
 {
   test_result<-predict_hybrid_1(object,newdata,xreg)
   test_matrix<-do.call(rbind,test_result)
