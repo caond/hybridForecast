@@ -30,7 +30,7 @@ predict_one_step <- function(hybrid_model,newdata_feat,xreg) {
         input_row <- newdata_feat[i, c("trend", names(hybrid_model$seasonal_periods$fouriers))]
       }
 
-      if (!is.na(xreg)) input_row<-cbind(newdata_feat[i,xreg, drop=FALSE],input_row)
+      if (!identical(xreg, NA)) input_row<-cbind(newdata_feat[i,xreg, drop=FALSE],input_row)
 
       if (model=="dl"){
         preds[[model]][i] <- predict_torch_model(hybrid_model[[model]],  as.matrix(input_row))
@@ -43,6 +43,7 @@ predict_one_step <- function(hybrid_model,newdata_feat,xreg) {
         recent_y <- tail(c(recent_y, preds[[model]][i]), max_lags)
       }
     }
+
   }
 
   return(preds)
@@ -91,6 +92,7 @@ predict_hybrid_1<-function(hybrid_model,newdata,xreg)
     #  train[[model]] <- predict(hybrid_model[[model]], xgb.DMatrix(as.matrix(hybrid_model$train_feat[, hybrid_model$xgb_model$feature_names])))
     if (model=='dl')
     {
+
       train[[model]] <- predict_torch_model(hybrid_model[[model]], as.matrix(hybrid_model$train_feat[,!names(hybrid_model$train_feat) %in% c('ds','y')]))
     }else{
       train[[model]] <- predict(hybrid_model[[model]], as.matrix(hybrid_model$train_feat[,!names(hybrid_model$train_feat) %in% c('ds','y')]))
@@ -177,11 +179,11 @@ predict.hybridForecast_model<-function(object,newdata,xreg=NA, ...)
 hybrid_core<-function(train, xreg, seasonal_periods,n_changepoints,max_lag,log_transform)
 {
   if(log_transform) train$y<-log(train$y+EPSILON)
-  if (is.na(xreg)) train<-train[,c('ds','y')]
+  if (identical(xreg, NA)) train<-train[,c('ds','y')]
   significant_lags<-find_lags(train,max_lag)
   #prepare features
 
-  feat_model<-prepare_trend_seasonal_component(train=train,significant_lags=significant_lags,seasonal_periods=seasonal_periods,n_changepoints=n_changepoints)
+  feat_model<-prepare_trend_seasonal_ar(train=train,significant_lags=significant_lags,seasonal_periods=seasonal_periods,n_changepoints=n_changepoints)
 
   train_feat<-feat_model$train_feat
   features <- setdiff(colnames(train_feat),c("ds","y"))
@@ -190,55 +192,36 @@ hybrid_core<-function(train, xreg, seasonal_periods,n_changepoints,max_lag,log_t
   X_train<-train_feat[, features]
   y_train <- train_feat$y
   ## train xgboost model on train
-  dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
-  dtrain_lgb <- lgb.Dataset(data = as.matrix(X_train), label = y_train)
-  set.seed(123)
-  xgb_model <- xgb.train(
-    params = list(
-      objective = "reg:squarederror",
-      max_depth = 6,
-      eta = 0.05,
-      subsample = 0.8,
-      colsample_bytree = 0.8,
-      min_child_weight = 5
-    ),
-    data = dtrain,
-    nrounds = 100,
-  )
-  if (FALSE)
-{
-  formula_str <- paste("y ~", paste(features, collapse = " + "))
-  dl_model <- nnet(
-    formula =as.formula(formula_str),
-    data=train_feat,
-    size= max(10, floor(sqrt(NROW(train_feat) / (length(features) + 1)))),
-    decay = 0.1,
-    MaxNWts = 5000,
-    linout = TRUE
-  )
-  }
-
-  dl_model <- train_torch_model(X_train, y_train)
 
 
+  cat('\nTraining Light Gbm model ...')
   #lm_model<-lm(as.formula(formula_str),data=train_feat)
-  lgb_model<-lgb.train(
-    params =
-      list(
-        objective = "regression",
-        metric = "l2",
-        learning_rate = 0.05,
-        num_leaves = 31,
-        max_depth=-1,
-        min_data_in_leaf = 20,
-        feature_fraction = 0.9,
-        bagging_fraction = 0.8,
-        bagging_freq = 1
-      ),
-    data = dtrain_lgb,
-    nrounds = 100,
-    verbose = -1
-  )
+
+  lgb_model<-train_lightgbm_model_random(X_train,y_train)$model
+
+
+
+  cat('\nTraining Xgboost model ...')
+  xgb_model<-train_xgboost_model_random(X_train,y_train)$model
+
+
+  # if (FALSE)
+  # {
+  #   formula_str <- paste("y ~", paste(features, collapse = " + "))
+  #   dl_model <- nnet(
+  #     formula =as.formula(formula_str),
+  #     data=train_feat,
+  #     size= max(10, floor(sqrt(NROW(train_feat) / (length(features) + 1)))),
+  #     decay = 0.1,
+  #     MaxNWts = 5000,
+  #     linout = TRUE
+  #   )
+  # }
+
+  cat('\nTraining Deep Learning model ...')
+  dl_model <- train_torch_model_random(X_train, y_train)
+
+
 
   return(list(xgb=xgb_model,lgb=lgb_model,dl=dl_model,train_feat=train_feat,significant_lags=significant_lags,seasonal_periods=seasonal_periods,ts_model=feat_model$ts_model,log_transform=log_transform))
 }
@@ -254,7 +237,7 @@ hybrid_core<-function(train, xreg, seasonal_periods,n_changepoints,max_lag,log_t
 #' @param n_changepoints Number of changepoints for trend. If \code{NA}, inferred automatically.
 #' @param max_lag Max lag for autoregressive features. If \code{NA}, chosen automatically.
 #' @param horizon Forecast horizon for cross-validation folds. If \code{NA}, 20% of data will be used for testing.
-#' @param max_fold Number of CV folds (default 5).
+#' @param max_fold Number of CV folds (default 1).
 #' @param log_transform Logical (default FALSE); whether to log-transform \code{y} before modelling.
 #'
 #' @return An object of class \code{"hybridForecast_model"} containing:
@@ -276,11 +259,11 @@ hybrid <- function(data,
                    n_changepoints = NA,
                    max_lag = NA,
                    horizon = NA,
-                   max_fold = 5,
+                   max_fold = 1,
                    log_transform=FALSE
                    ) {
 
-  data<-data%>%arrange(ds)
+  data<-data%>%dplyr::arrange(ds)
   N <- nrow(data)
 
   if (is.na(freq)) {
@@ -301,7 +284,7 @@ hybrid <- function(data,
   combinations <- expand.grid(model_choice) %>% tail(-1) %>% as.matrix()
 
   folds <- vector("list", max_fold)
-  if (is.na(horizon) || (N - horizon<30) ) horizon<- min(80,floor(0.2*N))
+  if (is.na(horizon) || (N - horizon<24) ) horizon<- min(80,floor(0.2*N))
   for (fold in seq_len(max_fold)) {
     cat("\nfold", fold)
 
@@ -318,7 +301,9 @@ hybrid <- function(data,
     ds <- test_data$ds
 
     for (model in model_used) {
+
         test_result[[model]]$mape <- smape(y, test_result[[model]]$yhat)
+        cat('\n',model,':',test_result[[model]]$mape)
     }
 
     # Combine forecasts
@@ -379,7 +364,7 @@ hybrid <- function(data,
     yhat_lower = yhat_all_lower[rownames(yhat_all_lower) == best_method, ],
     yhat_upper = yhat_all_upper[rownames(yhat_all_upper) == best_method, ],
     mape = mape_all
-  ) %>% group_by(fold) %>% mutate(fold_label = paste0("Fold ", fold, " (MAPE = ", round(mape[1] * 100, 1), "%)"))
+  ) %>% dplyr::group_by(fold) %>% dplyr::mutate(fold_label = paste0("Fold ", fold, " (MAPE = ", round(mape[1] * 100, 1), "%)"))
 
   # Refit on full data
 

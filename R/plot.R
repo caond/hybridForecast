@@ -9,22 +9,22 @@ plot.hybridForecast_model <- function(x, x_lab = NULL, y_lab = NULL, ...) {
     # Decide scale and format
     if (freq == "hour") {
       cv_data$ds <- as.POSIXct(cv_data$ds)
-      scale_func <- scale_x_datetime
+      scale_func <- ggplot2::scale_x_datetime
       xbreaks <- list(date_labels = "%H:%M", date_breaks = "1 hour")
       if (is.null(x_lab)) x_lab <- "Hour"
     } else if (freq %in% c("day", "week")) {
       cv_data$ds <- as.Date(cv_data$ds)
-      scale_func <- scale_x_date
+      scale_func <- ggplot2::scale_x_date
       xbreaks <- list(date_labels = "%m-%d", date_breaks = "1 day")
       if (is.null(x_lab)) x_lab <- "Date (mm-dd)"
     } else if (freq %in% c("month", "quarterly")) {
       cv_data$ds <- as.Date(cv_data$ds)
-      scale_func <- scale_x_date
+      scale_func <- ggplot2::scale_x_date
       xbreaks <- list(date_labels = "%m-%d", date_breaks = "1 month")
       if (is.null(x_lab)) x_lab <- "Date (mm-dd)"
     } else {  # year
       cv_data$ds <- as.Date(cv_data$ds)
-      scale_func <- scale_x_date
+      scale_func <- ggplot2::scale_x_date
       xbreaks <- list(date_labels = "%Y", date_breaks = "1 year")
       if (is.null(x_lab)) x_lab <- "Year"
     }
@@ -36,24 +36,24 @@ plot.hybridForecast_model <- function(x, x_lab = NULL, y_lab = NULL, ...) {
     }
 
     # Build plot
-    p <- ggplot(cv_data, aes(x = ds)) +
-      geom_ribbon(aes(ymin = yhat_lower, ymax = yhat_upper, group = fold_label),
+    p <- ggplot2::ggplot(cv_data, ggplot2::aes(x = ds)) +
+      ggplot2::geom_ribbon(ggplot2::aes(ymin = yhat_lower, ymax = yhat_upper, group = fold_label),
                   fill = "lightblue", alpha = 0.4) +
-      geom_line(aes(y = y, group = fold_label), color = "black", size = 1) +
-      geom_line(aes(y = yhat, group = fold_label), color = "blue", linetype = "dashed", size = 1) +
-      facet_wrap(~fold_label, scales = "free_x", ncol = 2) +
+      ggplot2::geom_line(ggplot2::aes(y = y, group = fold_label), color = "black", size = 1) +
+      ggplot2::geom_line(ggplot2::aes(y = yhat, group = fold_label), color = "blue", linetype = "dashed", size = 1) +
+      ggplot2::facet_wrap(~fold_label, scales = "free_x", ncol = 2) +
       do.call(scale_func, xbreaks) +
-      labs(
+      ggplot2::labs(
         title = paste0("Actual vs Predicted (Ensemble = ", x$emsemble,
                        ", MAPE = ", round(x$mape * 100, 1), "%)"),
         x = x_lab,
         y = y_lab,
         ...
       ) +
-      theme_minimal() +
-      theme(
+      ggplot2::theme_minimal() +
+      ggplot2::theme(
         legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1)
+        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1)
       )
 
     return(p)
@@ -69,22 +69,22 @@ plot.hybridForecast <- function(x, x_lab = NULL, y_lab = NULL, ...) {
   # Decide scale and format
   if (freq == "hour") {
     data_combined$ds<-as.POSIXct(data_combined$ds)
-    scale_func <- scale_x_datetime
+    scale_func <- ggplot2::scale_x_datetime
     xbreaks <- list(date_labels = "%H:%M", date_breaks = "1 hour")
     if (is.null(x_lab)) x_lab <- "Hour"
   } else if (freq %in% c("day", "week")) {
     data_combined$ds <- as.Date(data_combined$ds)
-    scale_func <- scale_x_date
+    scale_func <- ggplot2::scale_x_date
     xbreaks <- list(date_labels = "%m-%d", date_breaks = "1 day")
     if (is.null(x_lab)) x_lab <- "Date (mm-dd)"
   } else if (freq %in% c("month", "quarterly")) {
     data_combined$ds <- as.Date(data_combined$ds)
-    scale_func <- scale_x_date
+    scale_func <- ggplot2::scale_x_date
     xbreaks <- list(date_labels = "%m-%d", date_breaks = "1 month")
     if (is.null(x_lab)) x_lab <- "Date (mm-dd)"
   } else {  # year
     data_combined$ds <- as.Date(data_combined$ds)
-    scale_func <- scale_x_date
+    scale_func <- ggplot2::scale_x_date
     xbreaks <- list(date_labels = "%Y", date_breaks = "1 year")
     if (is.null(x_lab)) x_lab <- "Year"
   }
@@ -96,23 +96,23 @@ plot.hybridForecast <- function(x, x_lab = NULL, y_lab = NULL, ...) {
   }
 
   # Build plot
-  p <- ggplot(data_combined, aes(x = ds)) +
-    geom_ribbon(aes(ymin = yhat_lower, ymax = yhat_upper),
+  p <- ggplot2::ggplot(data_combined, ggplot2::aes(x = ds)) +
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = yhat_lower, ymax = yhat_upper),
                 fill = "lightblue", alpha = 0.4) +
-    geom_line(aes(y = y), color = "black", size = 1) +
-    geom_line(aes(y = yhat), color = "blue", linetype = "dashed", size = 1) +
+    ggplot2::geom_line(ggplot2::aes(y = y), color = "black", size = 1) +
+    ggplot2::geom_line(ggplot2::aes(y = yhat), color = "blue", linetype = "dashed", size = 1) +
     do.call(scale_func, xbreaks) +
-    labs(
+    ggplot2::labs(
       title = paste0("Forecasts from Ensemble (Ensemble = ", x$emsemble,
                      ", MAPE = ", round(x$mape * 100, 1), "%)"),
       x = x_lab,
       y = y_lab,
       ...
     ) +
-    theme_minimal() +
-    theme(
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
       legend.position = "none",
-      axis.text.x = element_text(angle = 45, hjust = 1)
+      axis.text.x = ggplot2::element_text(angle = 45, hjust = 1)
     )
 
   return(p)

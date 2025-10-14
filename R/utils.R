@@ -105,28 +105,28 @@ smape <- function(a, f) {
 auto_max_lag <- function(N, seasonal_periods) {
   stopifnot(N > 10L)
   freq <- seasonal_periods$freq
+  P <- unlist(seasonal_periods$fouriers, use.names = FALSE)
 
-  # Aggressive caps since Fourier handles seasonality
-  lag_cap <- switch(freq,
-                    "hour"    = 48L,  # ~2 day
-                    "day"     = 30L,
-                    "week"    = 8L,
-                    "month"   = 12L,
-                    "quarter" = 6L,
-                    "year"    = 2L,
-                    stop("Unknown freq")
+  # generous frequency caps (cover persistence, not seasonality)
+  freq_cap <- switch(freq,
+                     "hour"    = 168L,  # up to 1 week
+                     "day"     = 90L,   # ~3 months
+                     "week"    = 26L,   # ~6 months
+                     "month"   = 24L,   # 2 years
+                     "quarter" = 12L,   # 3 years
+                     "year"    = 5L,    # 5 years
+                     stop("Unknown freq")
   )
 
-  # Small, variance-friendly baseline for PACF
-  baseline <- max(3L, floor(6 * log10(N)))
-  n_cap    <- max(3L, floor(N / 6))   # stricter than N/4
+  # size-aware caps
+  base_cap <- max(5L, floor(3 * sqrt(N)))
+  n_cap    <- max(5L, floor(N / 3))
 
-  # We already use Fourier for seasonality → ignore seasonal lags in PACF
-  seasonal_max <- 0L
+  # anchor to a few cycles of the shortest Fourier period (if any)
+  seasonal_anchor <- if (length(P)) max(6L, floor(3 * min(P))) else 0L
 
-  as.integer(min(max(baseline, seasonal_max), lag_cap, n_cap))
+  as.integer(min(max(base_cap, seasonal_anchor), freq_cap, n_cap))
 }
-
 
 
 seasonal_periods_fourier<-function(freq)
@@ -164,7 +164,7 @@ detect_frequency<-function(ds) {
   diff_days <- as.numeric(median(diff(as.Date(ds)), na.rm = TRUE))
 
   # Define frequency thresholds (in days)
-  freq <- case_when(
+  freq <- dplyr::case_when(
     diff_days < 1 ~ "hour",
     diff_days < 2 ~ "day",
     diff_days < 8 ~ "week",
@@ -191,7 +191,7 @@ auto_seasonal_periods <- function(ds, min_obs = 3) {
 
 find_lags<-function(df,max_lag=10)
 {
-  adf_test<-adf.test(df$y)
+  adf_test<-tseries::adf.test(df$y)
   if (adf_test$p.value>0.05)  y <- diff(df$y)
   else y<- df$y
   pacf_vals <- pacf(y, lag.max = max_lag, plot = FALSE)
@@ -236,7 +236,7 @@ select_changepoints <- function(y, n_changepoints = NA,freq) {
     t_range <- 1:floor(0.9 * n)
     cps <- quantile(t_range, probs = seq(0.05, 0.95, length.out = n_changepoints))
   }
-  cat('\nnum of change points: ', length(cps))
+  cat('\nNumber of change points: ', length(cps))
   return(as.numeric(cps))
 }
 
@@ -426,7 +426,7 @@ predict_trend_seasonal_components <- function(model_obj, h) {
 }
 
 
-prepare_trend_seasonal_component<-function(train,significant_lags,seasonal_periods,n_changepoints)
+prepare_trend_seasonal_ar<-function(train,significant_lags,seasonal_periods,n_changepoints)
 {
 
   ts_model <- fit_trend_seasonal_model(y=train$y,seasonal_periods=seasonal_periods, n_changepoints=n_changepoints)
@@ -437,7 +437,7 @@ prepare_trend_seasonal_component<-function(train,significant_lags,seasonal_perio
   for (name in names(ts_model$seasonality)) {
     train_feat[[name]] <- ts_model$seasonality[[name]]
   }
-
+  # Add auto regressive
   for (i in significant_lags) {
     train_feat[[paste0("lag", i)]] <- dplyr::lag(train$y, i)
   }
@@ -447,26 +447,47 @@ prepare_trend_seasonal_component<-function(train,significant_lags,seasonal_perio
 
 #' @import torch
 #Define the neural network module
-Net <- nn_module(
-  initialize = function(input_dim, hidden_dim = 64, output_dim = 1) {
-    self$fc1 <- nn_linear(input_dim, hidden_dim)
-    self$fc2 <- nn_linear(hidden_dim, output_dim)
-  },
-  forward = function(x) {
-    x %>%
-      self$fc1() %>%
-      nnf_relu() %>%
-      self$fc2()
-  }
-)
+# Net <- nn_module(
+#   initialize = function(input_dim, hidden_dim = 64) {
+#     self$fc1 <- nn_linear(input_dim, hidden_dim)
+#     self$drop <- torch::nn_dropout(p = 0.1)
+#     self$fc2 <- nn_linear(hidden_dim, 1)
+#   },
+#   forward = function(x) {
+#     x %>%
+#       self$fc1() %>%
+#       nnf_relu() %>%
+#       self$fc2()
+#   }
+# )
+
+
+
+# Predict using trained model
+predict_torch_model <- function(model_obj, X_new) {
+  model <- model_obj$model
+  device <- model_obj$device
+
+  X_tensor <- torch_tensor(as.matrix(X_new), dtype = torch_float(), device = device)
+
+  model$eval()
+  preds <- model(X_tensor)$to(device = "cpu")  # move back to CPU
+  as.numeric(preds)
+}
 
 
 # Train the model
-train_torch_model <- function(X, y, epochs = 100, lr = 0.01, hidden_dim = 64) {
+train_torch_model <- function(X, y, epochs = 100, lr = 0.001, hidden_dim = 64) {
 
 
   # Auto-detect device (GPU if available, otherwise CPU)
   device <- if (cuda_is_available()) torch_device("cuda") else torch_device("cpu")
+
+
+  # Scale
+  #  x_mean <- colMeans(X)
+  # x_sd   <- apply(X, 2, sd); x_sd[x_sd == 0] <- 1
+  #Xs     <- sweep(sweep(X, 2, x_mean, "-"), 2, x_sd, "/")
 
   # Convert data to tensors
   X_tensor <- torch_tensor(as.matrix(X), dtype = torch_float(), device = device)
@@ -474,7 +495,7 @@ train_torch_model <- function(X, y, epochs = 100, lr = 0.01, hidden_dim = 64) {
 
   # Initialize model and optimizer
   input_dim <- ncol(X)
-  model <- Net(input_dim = input_dim, hidden_dim = hidden_dim)$to(device = device)
+  model <- Net(input_dim, hidden_dim)$to(device = device)
 
   optimizer <- optim_adam(model$parameters, lr = lr)
   loss_fn <- nn_mse_loss()
@@ -491,15 +512,574 @@ train_torch_model <- function(X, y, epochs = 100, lr = 0.01, hidden_dim = 64) {
   return(list(model = model, device = device))
 }
 
-# Predict using trained model
-predict_torch_model <- function(model_obj, X_new) {
-  model <- model_obj$model
-  device <- model_obj$device
 
-  X_tensor <- torch_tensor(as.matrix(X_new), dtype = torch_float(), device = device)
+Net <- torch::nn_module(
+  "Net",
+  initialize = function(input_dim, hidden_dim = 64L, p_drop = 0.1) {
+    self$fc1  <- torch::nn_linear(input_dim, as.integer(hidden_dim))
+    self$drop <- torch::nn_dropout(p = p_drop)
+    self$fc2  <- torch::nn_linear(as.integer(hidden_dim), 1L)
+  },
+  forward = function(x) {
+    x %>%
+      self$fc1() %>%
+      torch::nnf_relu() %>%
+      self$drop() %>%          # keep dropout; will auto-disable in eval()
+      self$fc2()
+  }
+)
 
-  model$eval()
-  preds <- model(X_tensor)$to(device = "cpu")  # move back to CPU
-  as.numeric(preds)
+# ---------- Utilities ----------
+
+make_split <- function(n, val_frac = 0.1) {
+  stopifnot(val_frac >= 0, val_frac < 1)
+  if (val_frac == 0) return(list(fit_idx = 1:n, val_idx = integer(0)))
+  train_end <- floor((1 - val_frac) * n)
+  list(fit_idx = 1:train_end, val_idx = (train_end + 1):n)
+}
+
+# Deterministic torch device selection (only used by torch trainer)
+torch_get_device_deterministic <- function(seed = 1234L) {
+  torch::torch_manual_seed(seed)
+  if (torch::cuda_is_available()) {
+    torch::use_deterministic_algorithms(TRUE)
+    torch::torch_backends_cudnn$deterministic <- TRUE
+    torch::torch_backends_cudnn$benchmark <- FALSE
+    torch::torch_device("cuda")
+  } else {
+    torch::torch_device("cpu")
+  }
+}
+
+bayes_optimize <- function(score_fn, bounds,
+                           init_points = 5, n_iter = 10,
+                           acq = "ucb", kappa = 2.576, seed = 123) {
+  set.seed(seed)
+  rBayesianOptimization::BayesianOptimization(
+    FUN         = function(...) list(Score = score_fn(list(...))),
+    bounds      = bounds,
+    init_points = init_points,
+    n_iter      = n_iter,
+    acq         = acq,
+    kappa       = kappa,
+    verbose     = FALSE
+  )$Best_Par
+}
+
+# ---------- Generic Bayes-train orchestrator ----------
+# Fits with Bayesian Optimization on a holdout slice, then refits on all data.
+# - fit_once(params, fit_idx, val_idx) -> list(score=..., model=..., extras=...)
+#   During search you should return $score; during refit you can return $model.
+# - refit(params) -> list(model=..., extras=...)
+
+bayes_train <- function(X, y, bounds,
+                        fit_once, refit,
+                        val_frac = 0.1,
+                        bo_seed = 123,
+                        init_points = 20, n_iter = 10) {
+  n <- nrow(X)
+  idx <- make_split(n, val_frac)
+
+  # 1) Define scoring fn for BO (maximize)
+  score_fn <- function(par_list) {
+    out <- fit_once(par_list, idx$fit_idx, idx$val_idx)
+    # Expect a scalar numeric to maximize
+    as.numeric(out$score)
+  }
+
+  # 2) Search
+  best <- bayes_optimize(
+    score_fn, bounds,
+    init_points = init_points, n_iter = n_iter, seed = bo_seed
+  )
+
+  # 3) Refit on all data
+  final <- refit(as.list(best))
+
+  list(model = final$model, params = best, extras = final$extras)
+}
+
+# =====================================================
+# ===============  TORCH (nn) TRAINER  ================
+# =====================================================
+
+train_torch_model_bayes <- function(X, y,
+                                    epochs = 100L,
+                                    val_frac = 0.1,
+                                    bounds = list(
+                                      lr           = c(1e-3, 1e-2),
+                                      hidden_dim   = c(32L, 128L),
+                                      p_drop       = c(0.05, 0.3),
+                                      weight_decay = c(1e-6, 1e-3)
+                                    )) {
+  set.seed(1234)
+  device <- torch_get_device_deterministic(1234L)
+
+  X <- as.matrix(X)
+  y <- as.numeric(y)
+  input_dim <- ncol(X)
+  loss_fn <- torch::nn_mse_loss()
+
+  fit_core <- function(Xt, yt, params) {
+    model <- Net(input_dim, as.integer(round(params$hidden_dim)), p_drop = params$p_drop)$to(device = device)
+    opt   <- torch::optim_adam(model$parameters, lr = params$lr, weight_decay = params$weight_decay)
+
+    for (ep in seq_len(epochs)) {
+      model$train()
+      opt$zero_grad()
+      pred <- model(Xt)
+      loss <- loss_fn(pred, yt)
+      loss$backward()
+      opt$step()
+    }
+    model
+  }
+
+  fit_once <- function(params, fit_idx, val_idx) {
+    X_fit <- torch::torch_tensor(X[fit_idx,, drop = FALSE], dtype = torch::torch_float(), device = device)
+    y_fit <- torch::torch_tensor(y[fit_idx], dtype = torch::torch_float(), device = device)$unsqueeze(2)
+
+    model <- fit_core(X_fit, y_fit, params)
+
+    if (length(val_idx)) {
+      X_val <- torch::torch_tensor(X[val_idx,, drop = FALSE], dtype = torch::torch_float(), device = device)
+      y_val <- torch::torch_tensor(y[val_idx], dtype = torch::torch_float(), device = device)$unsqueeze(2)
+      model$eval()
+      score <- -as.numeric(loss_fn(model(X_val), y_val)$item())  # maximize negative MSE
+      return(list(score = score, model = NULL))
+    } else {
+      return(list(score = NA_real_, model = model))
+    }
+  }
+
+  refit <- function(params) {
+    X_all <- torch::torch_tensor(X, dtype = torch::torch_float(), device = device)
+    y_all <- torch::torch_tensor(y, dtype = torch::torch_float(), device = device)$unsqueeze(2)
+    model <- fit_core(X_all, y_all, params)
+    list(model = model, extras = list(device = device))
+  }
+
+  bayes_train(X, y, bounds, fit_once, refit, val_frac = val_frac)
+}
+
+
+# =====================================================
+# ==============  XGBOOST (regression)  ===============
+# =====================================================
+
+train_xgboost_model_bayes <- function(X, y,
+                                      val_frac = 0.1,
+                                      bounds = list(
+                                        max_depth        = c(2L, 8L),
+                                        min_child_weight = c(1L, 10L),
+                                        subsample        = c(0.5, 0.9)
+                                      ),
+                                      nrounds = 100, eta = 0.1,
+                                      early_stopping_rounds = 20) {
+  stopifnot(nrow(X) == length(y))
+  X <- as.matrix(X); y <- as.numeric(y)
+
+  fit_once <- function(params, fit_idx, val_idx) {
+    dtrain <- xgboost::xgb.DMatrix(data = X[fit_idx,, drop = FALSE], label = y[fit_idx])
+    params_xgb <- list(
+      objective        = "reg:squarederror",
+      eval_metric      = "rmse",
+      eta              = eta,
+      max_depth        = as.integer(params$max_depth),
+      min_child_weight = as.integer(params$min_child_weight),
+      subsample        = params$subsample,
+      colsample_bytree = 0.8
+    )
+
+    if (length(val_idx)) {
+      dvalid <- xgboost::xgb.DMatrix(data = X[val_idx,, drop = FALSE], label = y[val_idx])
+      watch <- list(train = dtrain, valid = dvalid)
+      bst <- xgboost::xgb.train(
+        params  = params_xgb, data = dtrain, nrounds = nrounds,
+        watchlist = watch, early_stopping_rounds = early_stopping_rounds, verbose = 0
+      )
+      preds <- predict(bst, X[val_idx,, drop = FALSE])
+      score <- -smape(y[val_idx], preds)  # maximize
+      list(score = score, model = NULL)
+    } else {
+      bst <- xgboost::xgb.train(params = params_xgb, data = dtrain, nrounds = nrounds, verbose = 0)
+      list(score = NA_real_, model = bst)
+    }
+  }
+
+  refit <- function(params) {
+    dtrain <- xgboost::xgb.DMatrix(data = as.matrix(X), label = y)
+    bst <- xgboost::xgb.train(
+      params = list(
+        objective        = "reg:squarederror",
+        eval_metric      = "rmse",
+        eta              = eta,
+        max_depth        = as.integer(params$max_depth),
+        min_child_weight = as.integer(params$min_child_weight),
+        subsample        = params$subsample,
+        colsample_bytree = 0.8
+      ),
+      data = dtrain, nrounds = nrounds, verbose = 0
+    )
+    list(model = bst, extras = list(
+      best_iteration = bst$best_iteration %||% xgboost::xgb.attributes(bst)[["best_iteration"]]
+    ))
+  }
+
+  bayes_train(X, y, bounds, fit_once, refit, val_frac = val_frac)
+}
+
+# =====================================================
+# ==============  LIGHTGBM (regression)  ==============
+# =====================================================
+
+train_lightgbm_model_bayes <- function(X, y,
+                                       val_frac = 0.1,
+                                       bounds = list(
+                                         max_depth        = c(4L, 10L),
+                                         num_leaves       = c(8L, 255L),
+                                         min_data_in_leaf = c(20L, 600L),
+                                         feature_fraction = c(0.6, 1.0),
+                                         bagging_fraction = c(0.6, 1.0)
+                                       ),
+                                       nrounds = 100,
+                                       learning_rate = 0.05,
+                                       early_stopping_rounds = 20) {
+  stopifnot(nrow(X) == length(y))
+  X <- as.matrix(X); y <- as.numeric(y)
+
+  fit_once <- function(params, fit_idx, val_idx) {
+    dtrain <- lightgbm::lgb.Dataset(data = X[fit_idx,, drop = FALSE], label = y[fit_idx])
+    valids <- NULL
+
+    prm <- list(
+      objective = "regression",
+      metric = "l2",
+      learning_rate = learning_rate,
+      max_depth = as.integer(params$max_depth),
+      num_leaves = as.integer(params$num_leaves),
+      min_data_in_leaf = as.integer(params$min_data_in_leaf),
+      feature_fraction = params$feature_fraction,
+      bagging_fraction = params$bagging_fraction
+    )
+
+    if (length(val_idx)) {
+      dvalid <- lightgbm::lgb.Dataset(data = X[val_idx,, drop = FALSE], label = y[val_idx])
+      valids <- list(train = dtrain, valid = dvalid)
+      bst <- lightgbm::lgb.train(
+        params = prm, data = dtrain, nrounds = nrounds,
+        valids = valids, early_stopping_rounds = early_stopping_rounds, verbose = 0
+      )
+      preds <- predict(bst, X[val_idx,, drop = FALSE])
+      score <- -smape(y[val_idx], preds)  # maximize
+      list(score = score, model = NULL)
+    } else {
+      bst <- lightgbm::lgb.train(params = prm, data = dtrain, nrounds = nrounds, verbose = 0)
+      list(score = NA_real_, model = bst)
+    }
+  }
+
+  refit <- function(params) {
+    dtrain <- lightgbm::lgb.Dataset(data = X, label = y)
+    bst <- lightgbm::lgb.train(
+      params = list(
+        objective = "regression",
+        metric = "l2",
+        learning_rate = learning_rate,
+        max_depth = as.integer(params$max_depth),
+        num_leaves = as.integer(params$num_leaves),
+        min_data_in_leaf = as.integer(params$min_data_in_leaf),
+        feature_fraction = params$feature_fraction,
+        bagging_fraction = params$bagging_fraction
+      ),
+      data = dtrain, nrounds = nrounds, verbose = 0
+    )
+    list(model = bst, extras = list(best_iter = bst$best_iter))
+  }
+
+  bayes_train(X, y, bounds, fit_once, refit, val_frac = val_frac)
+}
+
+# ---------- Random Search Optimizer ----------
+random_optimize <- function(score_fn, bounds, n_iter = 15, seed = 123) {
+  set.seed(seed)
+  best_score <- -Inf
+  best_params <- NULL
+
+  for (i in 1:n_iter) {
+    # Sample random parameters from bounds
+    params <- lapply(names(bounds), function(param_name) {
+      b <- bounds[[param_name]]
+
+      # Check if integer bounds (by checking if both values are integers)
+      if (is.integer(b[1]) && is.integer(b[2])) {
+        as.integer(round(runif(1, b[1], b[2])))
+      } else {
+        runif(1, b[1], b[2])
+      }
+    })
+    names(params) <- names(bounds)
+
+    # Evaluate score
+    score <- tryCatch({
+      score_fn(params)
+    }, error = function(e) {
+      warning(paste("Error in iteration", i, ":", e$message))
+      -Inf
+    })
+
+    # Update best
+    if (is.finite(score) && score > best_score) {
+      best_score <- score
+      best_params <- params
+    }
+  }
+
+  if (is.null(best_params)) {
+    stop("Random search failed: no valid parameter combinations found")
+  }
+
+  best_params
+}
+
+# ---------- Generic Random-Search-train orchestrator ----------
+# Fits with Random Search on a holdout slice, then refits on all data.
+# - fit_once(params, fit_idx, val_idx) -> list(score=..., model=..., extras=...)
+#   During search you should return $score; during refit you can return $model.
+# - refit(params) -> list(model=..., extras=...)
+
+random_train <- function(X, y, bounds,
+                         fit_once, refit,
+                         val_frac = 0.1,
+                         search_seed = 123,
+                         n_iter = 15) {
+  n <- nrow(X)
+  idx <- make_split(n, val_frac)
+
+  # 1) Define scoring fn for random search (maximize)
+  score_fn <- function(par_list) {
+    out <- fit_once(par_list, idx$fit_idx, idx$val_idx)
+    # Expect a scalar numeric to maximize
+    as.numeric(out$score)
+  }
+
+  # 2) Search
+  best <- random_optimize(
+    score_fn, bounds,
+    n_iter = n_iter, seed = search_seed
+  )
+
+  # 3) Refit on all data
+  final <- refit(as.list(best))
+
+  list(model = final$model, params = best, extras = final$extras)
+}
+
+# =====================================================
+# ===============  TORCH (nn) TRAINER  ================
+# =====================================================
+
+train_torch_model_random <- function(X, y,
+                                     epochs = 100L,
+                                     search_epochs = 30L,
+                                     val_frac = 0.1,
+                                     n_iter = 15,
+                                     bounds = list(
+                                       lr           = c(1e-3, 1e-2),
+                                       hidden_dim   = c(32L, 128L),
+                                       p_drop       = c(0.05, 0.3),
+                                       weight_decay = c(1e-6, 1e-3)
+                                     )) {
+  set.seed(1234)
+  device <- torch_get_device_deterministic(1234L)
+
+  X <- as.matrix(X)
+  y <- as.numeric(y)
+  input_dim <- ncol(X)
+  loss_fn <- torch::nn_mse_loss()
+
+  fit_core <- function(Xt, yt, params, n_epochs) {
+    model <- Net(input_dim, as.integer(round(params$hidden_dim)), p_drop = params$p_drop)$to(device = device)
+    opt   <- torch::optim_adam(model$parameters, lr = params$lr, weight_decay = params$weight_decay)
+
+    for (ep in seq_len(n_epochs)) {
+      model$train()
+      opt$zero_grad()
+      pred <- model(Xt)
+      loss <- loss_fn(pred, yt)
+      loss$backward()
+      opt$step()
+    }
+    model
+  }
+
+  fit_once <- function(params, fit_idx, val_idx) {
+    X_fit <- torch::torch_tensor(X[fit_idx,, drop = FALSE], dtype = torch::torch_float(), device = device)
+    y_fit <- torch::torch_tensor(y[fit_idx], dtype = torch::torch_float(), device = device)$unsqueeze(2)
+
+    model <- fit_core(X_fit, y_fit, params, search_epochs)
+
+    if (length(val_idx)) {
+      X_val <- torch::torch_tensor(X[val_idx,, drop = FALSE], dtype = torch::torch_float(), device = device)
+      y_val <- torch::torch_tensor(y[val_idx], dtype = torch::torch_float(), device = device)$unsqueeze(2)
+      model$eval()
+      score <- -as.numeric(loss_fn(model(X_val), y_val)$item())  # maximize negative MSE
+      return(list(score = score, model = NULL))
+    } else {
+      return(list(score = NA_real_, model = model))
+    }
+  }
+
+  refit <- function(params) {
+    X_all <- torch::torch_tensor(X, dtype = torch::torch_float(), device = device)
+    y_all <- torch::torch_tensor(y, dtype = torch::torch_float(), device = device)$unsqueeze(2)
+    model <- fit_core(X_all, y_all, params, epochs)
+    list(model = model, extras = list(device = device))
+  }
+
+  random_train(X, y, bounds, fit_once, refit, val_frac = val_frac, n_iter = n_iter)
+}
+
+
+# =====================================================
+# ==============  XGBOOST (regression)  ===============
+# =====================================================
+
+train_xgboost_model_random <- function(X, y,
+                                       val_frac = 0.1,
+                                       n_iter = 15,
+                                       bounds = list(
+                                         max_depth        = c(2L, 8L),
+                                         min_child_weight = c(1L, 10L),
+                                         subsample        = c(0.5, 0.9)
+                                       ),
+                                       nrounds = 100,
+                                       search_nrounds = 30,
+                                       eta = 0.1,
+                                       early_stopping_rounds = 10) {
+  stopifnot(nrow(X) == length(y))
+  X <- as.matrix(X); y <- as.numeric(y)
+
+  fit_once <- function(params, fit_idx, val_idx) {
+    dtrain <- xgboost::xgb.DMatrix(data = X[fit_idx,, drop = FALSE], label = y[fit_idx])
+    params_xgb <- list(
+      objective        = "reg:squarederror",
+      eval_metric      = "rmse",
+      eta              = eta,
+      max_depth        = as.integer(params$max_depth),
+      min_child_weight = as.integer(params$min_child_weight),
+      subsample        = params$subsample,
+      colsample_bytree = 0.8
+    )
+
+    if (length(val_idx)) {
+      dvalid <- xgboost::xgb.DMatrix(data = X[val_idx,, drop = FALSE], label = y[val_idx])
+      watch <- list(train = dtrain, valid = dvalid)
+      bst <- xgboost::xgb.train(
+        params  = params_xgb, data = dtrain, nrounds = search_nrounds,
+        watchlist = watch, early_stopping_rounds = early_stopping_rounds, verbose = 0
+      )
+      preds <- predict(bst, X[val_idx,, drop = FALSE])
+      score <- -smape(y[val_idx], preds)  # maximize
+      list(score = score, model = NULL)
+    } else {
+      bst <- xgboost::xgb.train(params = params_xgb, data = dtrain, nrounds = search_nrounds, verbose = 0)
+      list(score = NA_real_, model = bst)
+    }
+  }
+
+  refit <- function(params) {
+    dtrain <- xgboost::xgb.DMatrix(data = as.matrix(X), label = y)
+    bst <- xgboost::xgb.train(
+      params = list(
+        objective        = "reg:squarederror",
+        eval_metric      = "rmse",
+        eta              = eta,
+        max_depth        = as.integer(params$max_depth),
+        min_child_weight = as.integer(params$min_child_weight),
+        subsample        = params$subsample,
+        colsample_bytree = 0.8
+      ),
+      data = dtrain, nrounds = nrounds, verbose = 0
+    )
+    list(model = bst, extras = list(
+      best_iteration = bst$best_iteration %||% xgboost::xgb.attributes(bst)[["best_iteration"]]
+    ))
+  }
+
+  random_train(X, y, bounds, fit_once, refit, val_frac = val_frac, n_iter = n_iter)
+}
+
+
+# =====================================================
+# ==============  LIGHTGBM (regression)  ==============
+# =====================================================
+
+train_lightgbm_model_random <- function(X, y,
+                                        val_frac = 0.1,
+                                        n_iter = 15,
+                                        bounds = list(
+                                          max_depth        = c(4L, 10L),
+                                          num_leaves       = c(8L, 255L),
+                                          min_data_in_leaf = c(20L, 600L),
+                                          feature_fraction = c(0.6, 1.0),
+                                          bagging_fraction = c(0.6, 1.0)
+                                        ),
+                                        nrounds = 100,
+                                        search_nrounds = 30,
+                                        learning_rate = 0.05,
+                                        early_stopping_rounds = 10) {
+  stopifnot(nrow(X) == length(y))
+  X <- as.matrix(X); y <- as.numeric(y)
+
+  fit_once <- function(params, fit_idx, val_idx) {
+    dtrain <- lightgbm::lgb.Dataset(data = X[fit_idx,, drop = FALSE], label = y[fit_idx])
+    valids <- NULL
+    prm <- list(
+      objective = "regression",
+      metric = "l2",
+      learning_rate = learning_rate,
+      max_depth = as.integer(params$max_depth),
+      num_leaves = as.integer(params$num_leaves),
+      min_data_in_leaf = as.integer(params$min_data_in_leaf),
+      feature_fraction = params$feature_fraction,
+      bagging_fraction = params$bagging_fraction
+    )
+
+    if (length(val_idx)) {
+      dvalid <- lightgbm::lgb.Dataset(data = X[val_idx,, drop = FALSE], label = y[val_idx])
+      valids <- list(train = dtrain, valid = dvalid)
+      bst <- lightgbm::lgb.train(
+        params = prm, data = dtrain, nrounds = search_nrounds,
+        valids = valids, early_stopping_rounds = early_stopping_rounds, verbose = 0
+      )
+      preds <- predict(bst, X[val_idx,, drop = FALSE])
+      score <- -smape(y[val_idx], preds)  # maximize
+      list(score = score, model = NULL)
+    } else {
+      bst <- lightgbm::lgb.train(params = prm, data = dtrain, nrounds = search_nrounds, verbose = 0)
+      list(score = NA_real_, model = bst)
+    }
+  }
+
+  refit <- function(params) {
+    dtrain <- lightgbm::lgb.Dataset(data = X, label = y)
+    bst <- lightgbm::lgb.train(
+      params = list(
+        objective = "regression",
+        metric = "l2",
+        learning_rate = learning_rate,
+        max_depth = as.integer(params$max_depth),
+        num_leaves = as.integer(params$num_leaves),
+        min_data_in_leaf = as.integer(params$min_data_in_leaf),
+        feature_fraction = params$feature_fraction,
+        bagging_fraction = params$bagging_fraction
+      ),
+      data = dtrain, nrounds = nrounds, verbose = 0
+    )
+    list(model = bst, extras = list(best_iter = bst$best_iter))
+  }
+
+  random_train(X, y, bounds, fit_once, refit, val_frac = val_frac, n_iter = n_iter)
 }
 

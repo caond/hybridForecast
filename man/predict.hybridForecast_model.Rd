@@ -12,7 +12,7 @@
 \item{newdata}{A \code{data.frame} of future periods to forecast, including
 a \code{ds} column (and any required regressors if applicable).}
 
-\item{xreg}{Optional exogenous regressors (\code{vector of column names in newdata} or NA) or \code{NA} (default) if none.}
+\item{xreg}{Optional exogenous regressors (\code{vector of column names in newdata}) or \code{NA} (default) if none.}
 
 \item{...}{Additional arguments (currently unused).}
 }

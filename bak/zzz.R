@@ -4,7 +4,7 @@
 #' @import lubridate
 #' @import lightgbm
 #' @import xgboost
-#' @import nnet
 #' @import keras
 #' @import tseries
+#' @import rBayesianOptimization
 NULL

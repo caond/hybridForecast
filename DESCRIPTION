@@ -2,17 +2,24 @@ Package: hybridForecast
 Type: Package
 Title: Hybrid Time Series Forecasting with Trend and Seasonality
 Version: 0.1.0
-Authors@R: person("Cao Nguyen", email = "cao.nguyen@health.wa.gov.au", role = c("aut", "cre"))
-Description: Forecasting using hybrid models (XGBoost, LightGBM, Neural Net) with trend/seasonal decomposition and changepoint detection.
-License: MIT
+Authors@R: c(person("Cao", "Nguyen", email = "cao.nguyen@health.wa.gov.au", role = c("aut", "cre")))
+Description: Provides hybrid methods for time series forecasting that combine
+    machine learning learners (e.g., 'xgboost', 'lightgbm', and neural networks via 'torch')
+    with trend and seasonal decomposition, changepoint detection, and rolling-origin
+    cross-validation. Includes Bayesian hyperparameter optimisation using
+    'rBayesianOptimization', support for exogenous regressors, automated handling of
+    missing values and outliers, and prediction interval estimation. Designed for
+    robust forecasting of complex, noisy series in operational settings.
+License: MIT + file LICENSE
 Encoding: UTF-8
-LazyData: true
-Depends: R (>= 4.0.0)
+Depends: 
+    R (>= 4.0.0)
 Imports:
     dplyr,
     zoo,
     xgboost,
     torch,
+    rBayesianOptimization,
     lightgbm,
     glmnet,
     tseries,
@@ -21,5 +28,16 @@ Imports:
     changepoint.np,
     lubridate,
     stats,
-    graphics
+    graphics,
+    utils,
+    methods
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown,
+    tibble,
+    tsibble,
+    covr
+Config/testthat/edition: 3
+VignetteBuilder: knitr
 RoxygenNote: 7.3.2
