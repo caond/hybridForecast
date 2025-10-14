@@ -100,8 +100,8 @@ predict_hybrid_1<-function(hybrid_model,newdata,xreg)
 
     if (hybrid_model$log_transform)
     {
-      residuals[[model]] <- exp(hybrid_model$train_feat$y) - exp(train[[model]])
-      yhat[[model]]  <- exp(yhat[[model]]) - EPSILON
+      residuals[[model]] <- expm1(hybrid_model$train_feat$y) - expm1(train[[model]])
+      yhat[[model]]  <- expm1(yhat[[model]])
     }else{
       residuals[[model]] <- hybrid_model$train_feat$y - train[[model]]
     }
@@ -178,8 +178,10 @@ predict.hybridForecast_model<-function(object,newdata,xreg=NA, ...)
 
 hybrid_core<-function(train, xreg, seasonal_periods,n_changepoints,max_lag,log_transform)
 {
-  if(log_transform) train$y<-log(train$y+EPSILON)
+
+  if(log_transform) train$y<-log1p(train$y)
   if (identical(xreg, NA)) train<-train[,c('ds','y')]
+  else train<-train[,c('ds','y',xreg)]
   significant_lags<-find_lags(train,max_lag)
   #prepare features
 
@@ -187,7 +189,7 @@ hybrid_core<-function(train, xreg, seasonal_periods,n_changepoints,max_lag,log_t
 
   train_feat<-feat_model$train_feat
   features <- setdiff(colnames(train_feat),c("ds","y"))
-  #if (!is.na(xreg)) features<-c(features,xreg)
+  #if (!identical(xreg, NA)) features<-c(features,xreg)
 
   X_train<-train_feat[, features]
   y_train <- train_feat$y
@@ -198,7 +200,6 @@ hybrid_core<-function(train, xreg, seasonal_periods,n_changepoints,max_lag,log_t
   #lm_model<-lm(as.formula(formula_str),data=train_feat)
 
   lgb_model<-train_lightgbm_model_random(X_train,y_train)$model
-
 
 
   cat('\nTraining Xgboost model ...')

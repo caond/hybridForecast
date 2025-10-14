@@ -99,6 +99,7 @@ simulate_time_series <- function(start_date = "2020-01-01",
 smape <- function(a, f) {
 
   a[which(a==Inf)]<- VERY_LARGE
+  f[which(f==Inf)]<- VERY_LARGE
   (1/length(a) * sum(2*abs(f-a) / (abs(a+EPSILON)+abs(f+EPSILON))))
 }
 
@@ -165,11 +166,11 @@ detect_frequency<-function(ds) {
 
   # Define frequency thresholds (in days)
   freq <- dplyr::case_when(
-    diff_days < 1 ~ "hour",
-    diff_days < 2 ~ "day",
-    diff_days < 8 ~ "week",
-    diff_days < 31 ~ "month",
-    diff_days < 92 ~ "quarter",
+    diff_days <= 1 ~ "hour",
+    diff_days <= 2 ~ "day",
+    diff_days <= 8 ~ "week",
+    diff_days <= 31 ~ "month",
+    diff_days <= 92 ~ "quarter",
     TRUE ~ "year"
   )
   return(freq)
@@ -189,7 +190,7 @@ auto_seasonal_periods <- function(ds, min_obs = 3) {
   return(seasonal_periods)
 }
 
-find_lags<-function(df,max_lag=10)
+find_lags<-function(df,max_lag=12)
 {
   adf_test<-tseries::adf.test(df$y)
   if (adf_test$p.value>0.05)  y <- diff(df$y)
@@ -801,7 +802,7 @@ train_lightgbm_model_bayes <- function(X, y,
 }
 
 # ---------- Random Search Optimizer ----------
-random_optimize <- function(score_fn, bounds, n_iter = 15, seed = 123) {
+random_optimize <- function(score_fn, bounds, n_iter = 100, seed = 123) {
   set.seed(seed)
   best_score <- -Inf
   best_params <- NULL
@@ -852,7 +853,7 @@ random_train <- function(X, y, bounds,
                          fit_once, refit,
                          val_frac = 0.1,
                          search_seed = 123,
-                         n_iter = 15) {
+                         n_iter = 100) {
   n <- nrow(X)
   idx <- make_split(n, val_frac)
 
@@ -883,7 +884,7 @@ train_torch_model_random <- function(X, y,
                                      epochs = 100L,
                                      search_epochs = 30L,
                                      val_frac = 0.1,
-                                     n_iter = 15,
+                                     n_iter = 100,
                                      bounds = list(
                                        lr           = c(1e-3, 1e-2),
                                        hidden_dim   = c(32L, 128L),
@@ -947,7 +948,7 @@ train_torch_model_random <- function(X, y,
 
 train_xgboost_model_random <- function(X, y,
                                        val_frac = 0.1,
-                                       n_iter = 15,
+                                       n_iter = 100,
                                        bounds = list(
                                          max_depth        = c(2L, 8L),
                                          min_child_weight = c(1L, 10L),
@@ -956,7 +957,7 @@ train_xgboost_model_random <- function(X, y,
                                        nrounds = 100,
                                        search_nrounds = 30,
                                        eta = 0.1,
-                                       early_stopping_rounds = 10) {
+                                       early_stopping_rounds = 50) {
   stopifnot(nrow(X) == length(y))
   X <- as.matrix(X); y <- as.numeric(y)
 
@@ -1017,7 +1018,7 @@ train_xgboost_model_random <- function(X, y,
 
 train_lightgbm_model_random <- function(X, y,
                                         val_frac = 0.1,
-                                        n_iter = 15,
+                                        n_iter = 100,
                                         bounds = list(
                                           max_depth        = c(4L, 10L),
                                           num_leaves       = c(8L, 255L),
@@ -1028,7 +1029,7 @@ train_lightgbm_model_random <- function(X, y,
                                         nrounds = 100,
                                         search_nrounds = 30,
                                         learning_rate = 0.05,
-                                        early_stopping_rounds = 10) {
+                                        early_stopping_rounds = 50) {
   stopifnot(nrow(X) == length(y))
   X <- as.matrix(X); y <- as.numeric(y)
 
@@ -1043,7 +1044,9 @@ train_lightgbm_model_random <- function(X, y,
       num_leaves = as.integer(params$num_leaves),
       min_data_in_leaf = as.integer(params$min_data_in_leaf),
       feature_fraction = params$feature_fraction,
-      bagging_fraction = params$bagging_fraction
+      bagging_fraction = params$bagging_fraction,
+      force_col_wise = TRUE,
+      verbose = -1
     )
 
     if (length(val_idx)) {
@@ -1073,7 +1076,9 @@ train_lightgbm_model_random <- function(X, y,
         num_leaves = as.integer(params$num_leaves),
         min_data_in_leaf = as.integer(params$min_data_in_leaf),
         feature_fraction = params$feature_fraction,
-        bagging_fraction = params$bagging_fraction
+        bagging_fraction = params$bagging_fraction,
+        force_col_wise = TRUE,
+        verbose = -1
       ),
       data = dtrain, nrounds = nrounds, verbose = 0
     )
